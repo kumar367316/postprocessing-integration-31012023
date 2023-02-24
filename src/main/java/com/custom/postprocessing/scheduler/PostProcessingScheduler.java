@@ -138,13 +138,7 @@ public class PostProcessingScheduler {
 
 	List<String> pclFileList = new LinkedList<>();
 
-	List<String> pclFiles = new LinkedList<>();
-
-	List<String> processFileList = new LinkedList<>();
-
 	List<String> failedFileList = new LinkedList<>();
-
-	List<String> archiveFileList = new LinkedList<>();
 
 	String exceptionMessage = " Successfully";
 
@@ -158,22 +152,20 @@ public class PostProcessingScheduler {
 		String currentDate = currentDate();
 		String currentDateTime = currentDateTimeStamp();
 		String statusMessage = "SmartComm PostProcessing";
+		List<String> archiveFileList = new LinkedList<>();
 		failedFileList = new LinkedList<>();
-		processFileList = new LinkedList<>();
-		pclFiles = new LinkedList<>();
-		archiveFileList = new LinkedList<>();
 		try {
 			final CloudBlobContainer container = containerInfo();
 			deleteCompletedTxtFile(container);
 			deletePreviousLogFile();
 			String tempDirectory = OUTPUT_DIRECTORY + TRANSIT_DIRECTORY + "/" + currentDateTime + "-temp" + "/";
 			moveFilesToTempBackup(OUTPUT_DIRECTORY + ARCHIVE_DIRECTORY, tempDirectory);
-			moveSourceToTargetDirectory(tempDirectory, currentDate, currentDateTime, container);
+			archiveFileList = moveSourceToTargetDirectory(tempDirectory, currentDate, currentDateTime, container,archiveFileList);
 			String transitPrintTargetDirectory = OUTPUT_DIRECTORY + TRANSIT_DIRECTORY + "/" + currentDateTime
 					+ PRINT_SUB_DIRECTORY + "/";
 			CloudBlobDirectory printDirectory = getDirectoryName(container, "", transitPrintTargetDirectory);
 			PostProcessingJsonEntity postProcessingJsonEntity = processMetaDataInputFile(printDirectory,
-					currentDateTime, currentDate);
+					currentDateTime, currentDate, archiveFileList);
 			logger.info("postprcoessing json entity " + postProcessingJsonEntity);
 			processCompleteFile(currentDateTime);
 		} catch (Exception exception) {
@@ -221,13 +213,14 @@ public class PostProcessingScheduler {
 		return blobName.replace(OUTPUT_DIRECTORY + ARCHIVE_DIRECTORY, "");
 	}
 
-	private void moveSourceToTargetDirectory(String sourceDirectory, String currentDate, String currentDateTime,
-			CloudBlobContainer container) throws StorageException, IOException {
+	private List<String> moveSourceToTargetDirectory(String sourceDirectory, String currentDate, String currentDateTime,
+			CloudBlobContainer container,List<String> archiveList) throws StorageException, IOException {
 		BlobContainerClient blobContainerClient = getBlobContainerClient(connectionNameKey, containerName);
 		Iterable<BlobItem> listBlobs = blobContainerClient.listBlobsByHierarchy(sourceDirectory);
 		String targetProcessedPrintDirectory = OUTPUT_DIRECTORY + TRANSIT_DIRECTORY + "/" + currentDateTime
 				+ PRINT_SUB_DIRECTORY + "/";
 		List<String> batchDetailsList = postProcessingBatchDetails();
+		List<String> archiveListCollection = new LinkedList<>();
 		try {
 			CloudBlobDirectory archiveDirectory = getDirectoryName(container, "", sourceDirectory);
 			for (BlobItem blobItem : listBlobs) {
@@ -241,21 +234,24 @@ public class PostProcessingScheduler {
 					if (!validXmlInputFIle || !validBatchType) {
 						continue;
 					}
-					fileSeparateOperation(fileName, currentDate, currentDateTime, targetProcessedPrintDirectory);
+					archiveList = fileSeparateOperation(fileName, currentDate, currentDateTime,
+							targetProcessedPrintDirectory,archiveList);
+					archiveListCollection.addAll(archiveList);
 				}
 			}
 		} catch (Exception exception) {
 			exceptionMessage = PostProcessingConstant.EXCEPTION_MSG;
 			logger.info("Exception moveSourceToTargetDirectory() " + exception.getMessage());
 		}
+		return archiveList;
 	}
 
 	public boolean inputXmlFileValidation(String inputXmlFile) {
 		return validateXmlInputFile(inputXmlFile);
 	}
 
-	public void fileSeparateOperation(String fileName, String currentDate, String currentDateTime,
-			String targetDirectory) {
+	public List<String> fileSeparateOperation(String fileName, String currentDate, String currentDateTime,
+			String targetDirectory, List<String> archiveFileList) {
 		try {
 			String xmlInputFile = fileName;
 			String pdfInputFile = fileName.replace(".xml", ".pdf");
@@ -318,16 +314,20 @@ public class PostProcessingScheduler {
 			exceptionMessage = PostProcessingConstant.EXCEPTION_MSG;
 			logger.info("printOnly functionality is not available ");
 		}
+		return archiveFileList;
 	}
 
 	public PostProcessingJsonEntity processMetaDataInputFile(CloudBlobDirectory transitDirectory,
-			String currentDateTime, String currentDate) {
+			String currentDateTime, String currentDate, List<String> archiveFileList) {
 		Map<String, List<String>> postProcessMap = new HashMap<>();
+		List<String> processFileList = new LinkedList<>();
+		List<String> pclFiles = new LinkedList<String>();
 		try {
 			Iterable<ListBlobItem> blobList = transitDirectory.listBlobs();
 			for (ListBlobItem blobItem : blobList) {
 				String fileName = getFileNameFromBlobURI(blobItem.getUri()).replace(SPACE_VALUE, EMPTY_SPACE);
 				logger.info("process file:" + fileName);
+
 				processFileList.add(fileName);
 				CloudBlockBlob initialFileDownload = transitDirectory.getBlockBlobReference(fileName);
 				initialFileDownload.downloadToFile(fileName);
@@ -431,7 +431,7 @@ public class PostProcessingScheduler {
 			}
 
 			if (postProcessMap.size() > 0) {
-				mergePDF(postProcessMap, currentDateTime, currentDate);
+				pclFiles = mergePDF(postProcessMap, currentDateTime, currentDate, pclFiles);
 			} else {
 				logger.info("no file for postprocessing ");
 			}
@@ -499,8 +499,8 @@ public class PostProcessingScheduler {
 	}
 
 	// post merge PDF
-	public void mergePDF(Map<String, List<String>> postProcessMap, String currentDateTime, String currentDate)
-			throws IOException {
+	public List<String> mergePDF(Map<String, List<String>> postProcessMap, String currentDateTime, String currentDate,
+			List<String> pclFiles) throws IOException {
 		List<String> fileNameList = new LinkedList<>();
 		CloudBlobContainer container = containerInfo();
 		MemoryUsageSetting memoryUsageSetting = MemoryUsageSetting.setupMainMemoryOnly();
@@ -540,7 +540,7 @@ public class PostProcessingScheduler {
 
 				pdfMerger.mergeDocuments(memoryUsageSetting);
 
-				convertPDFToPCL(mergePdfFile, container, currentDateTime);
+				pclFiles = convertPDFToPCL(mergePdfFile, container, currentDateTime, pclFiles);
 				bannerFile.delete();
 				new File(mergePdfFile).delete();
 				new File(blankPage).delete();
@@ -572,11 +572,13 @@ public class PostProcessingScheduler {
 		licenseFile.delete();
 		deleteFiles(pclFileList);
 		pclFileList.clear();
+		return pclFiles;
 	}
 
 	// post processing PDF to PCL conversion
-	public void convertPDFToPCL(String mergePdfFile, CloudBlobContainer container, String currentDateTime)
-			throws IOException {
+	public List<String> convertPDFToPCL(String mergePdfFile, CloudBlobContainer container, String currentDateTime,
+			List<String> pclFiles) throws IOException {
+		List<String> pclFileCreation = new LinkedList<>();
 		String outputPclFile = FilenameUtils.removeExtension(mergePdfFile) + ".pcl";
 		try {
 			CloudBlobDirectory transitDirectory = getDirectoryName(container, ROOT_DIRECTORY, LICENSE_DIRECTORY);
@@ -586,16 +588,16 @@ public class PostProcessingScheduler {
 			blob.downloadToFile(new File(licenseFileName).getAbsolutePath());
 			License license = new License();
 			license.setLicense(licenseFileName);
-			//pclFiles.add(outputPclFile);
-			pclFileCreation(mergePdfFile, outputPclFile, currentDateTime);
+			pclFileCreation = pclFileCreation(mergePdfFile, outputPclFile, currentDateTime, pclFiles);
 		} catch (Exception exception) {
 			logger.info("The license has expired:no need to print pcl file with evaluation copies");
 		}
 		if (pclEvaluationCopies) {
 			logger.info("The license has expired:print pcl file with evaluation copies");
-			pclFileCreation(mergePdfFile, outputPclFile, currentDateTime);
+			pclFileCreation = pclFileCreation(mergePdfFile, outputPclFile, currentDateTime, pclFiles);
 		}
 		new File(outputPclFile).delete();
+		return pclFileCreation;
 	}
 
 	public void copyFileToTargetDirectory(String fileName, String rootDirectory, String targetDirectory) {
@@ -771,7 +773,8 @@ public class PostProcessingScheduler {
 		return fileName.replace(replaceFolerName, "");
 	}
 
-	public void pclFileCreation(String mergePdfFile, String outputPclFile, String currentDateTime) {
+	public List<String> pclFileCreation(String mergePdfFile, String outputPclFile, String currentDateTime,
+			List<String> pclFiles) {
 		try {
 			PdfFileEditor fileEditor = new PdfFileEditor();
 			final InputStream stream = new FileInputStream(mergePdfFile);
@@ -789,6 +792,7 @@ public class PostProcessingScheduler {
 			exceptionMessage = PostProcessingConstant.EXCEPTION_MSG;
 			logger.info("Exception pclFileCreation() " + exception.getMessage());
 		}
+		return pclFiles;
 	}
 
 	public String removeArchiveTotalSheetFileElement(File file, boolean renameFile, String currentDate,
